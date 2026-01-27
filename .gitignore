@@ -1,0 +1,22 @@
+# Python junk
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Media files (Don't upload these!)
+*.mp3
+*.mp4
+*.vtt
+*.wav
+
+# Generated Books
+*.epub
+
+# Temp files
+temp_vid_*
+
+# IDE settings
+.vscode/
+.idea/

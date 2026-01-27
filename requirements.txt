@@ -1,0 +1,8 @@
+yt-dlp
+ollama
+EbookLib
+# WhisperX needs to be installed from git for stability
+git+https://github.com/m-bain/whisperx.git
+# Torch is required but usually best installed separately based on CUDA version
+torch
+torchaudio

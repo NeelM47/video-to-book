@@ -1,0 +1,47 @@
+@namespace epub "http://www.idpf.org/2007/ops";
+
+/* Optional: Try to import Roboto if the e-reader allows online access. 
+   Otherwise, it falls back to the system's sans-serif. */
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap');
+
+body {
+    /* Main Font Setting */
+    font-family: 'Roboto', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    
+    /* Dark Mode Base */
+    background-color: #121212; 
+    
+    /* The "Ghost" Text (The non-bold parts are dimmed to guide the eye forward) */
+    color: #A0A0A0;            
+    
+    /* Spacing for "Addictive" Flow */
+    line-height: 1.7;          /* Generous height prevents line-skipping mistakes */
+    font-size: 1.1em;          /* Slightly larger than standard */
+    margin: 0;
+    padding: 5% 8%;            /* Wider side margins to narrow the text column */
+    text-align: left;          /* Left align is actually better for speed reading than justify */
+}
+
+/* The Fixation Points (Bionic Highlights) */
+b {
+    color: #FFFFFF;            /* Pure White: Pops against the dark background */
+    font-weight: 700;          /* Strong Bold */
+    opacity: 1;                /* Ensure full visibility */
+}
+
+/* Paragraph Spacing */
+p {
+    margin-bottom: 1.5em;      /* Clear separation between thoughts */
+    margin-top: 0;
+}
+
+/* Headings */
+h1, h2, h3 {
+    font-family: 'Roboto', sans-serif;
+    color: #E0E0E0;
+    font-weight: 700;
+    line-height: 1.3;
+    margin-top: 2em;
+    margin-bottom: 1em;
+    text-align: center;
+}
