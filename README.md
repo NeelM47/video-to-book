@@ -37,7 +37,6 @@
 
 ### 1. Clone the Repo
 ```
-```bash
 git clone https://github.com/NeelM47/video-to-book.git
 cd video-to-book
 ```
