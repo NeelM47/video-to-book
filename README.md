@@ -1,4 +1,4 @@
-```
+```markdown
 # 📖 TubeToPage: AI-Powered YouTube-to-eBook Converter
 
 **TubeToPage** is a high-performance Python tool that transforms YouTube videos into polished, professional eBooks. By leveraging state-of-the-art AI models via **Groq**, it synthesizes audio transcripts and YouTube captions into a coherent narrative, formatted specifically for "Bionic Reading."
@@ -35,6 +35,7 @@
 
 ---
 
+```
 ## ⚙️ Installation & Setup
 
 ### 1. Clone the Repo
@@ -81,25 +82,4 @@ Contributions, issues, and feature requests are welcome! Feel free to check the 
 
 ## 📜 License
 [MIT](https://choosealicense.com/licenses/mit/)
-```
-
----
-
-### Updated Code Logic for `main.py`
-To make sure the README and the Code match, ensure your `get_groq_client` function looks like this:
-
-```python
-def get_groq_client():
-    # 1. Try to get the key from the Environment Variable (System)
-    api_key = os.environ.get("GROQ_API_KEY")
-    
-    # 2. If not found, ask the user to type it in (Secure)
-    if not api_key:
-        print("🔑 Groq API Key not found in environment variables.")
-        api_key = input("👉 Enter your Groq API Key: ").strip()
-        
-    if not api_key:
-        raise ValueError("A Groq API Key is required to run this program.")
-        
-    return Groq(api_key=api_key)
 ```
