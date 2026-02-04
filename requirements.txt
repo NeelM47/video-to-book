@@ -1,8 +1,10 @@
 yt-dlp
-ollama
 EbookLib
+groq
+icecream
+python-dotenv
 # WhisperX needs to be installed from git for stability
 git+https://github.com/m-bain/whisperx.git
 # Torch is required but usually best installed separately based on CUDA version
-torch
-torchaudio
+#torch
+#torchaudio

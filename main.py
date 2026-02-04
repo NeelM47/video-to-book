@@ -1,29 +1,35 @@
 import torch
 import typing
 import collections
+from dotenv import load_dotenv
 import functools
 import yt_dlp
 import gc
 import whisperx
 import os
 import re
-from groq import Groq 
+from groq import Groq
 from ebooklib import epub
 from icecream import ic
 
+load_dotenv()
+
 # --- THE "MASTER KEY" FOR PYTORCH 2.6+ ---
+
 import torch.serialization
 original_load = torch.load
+
 def patched_load(*args, **kwargs):
     kwargs["weights_only"] = False
     return original_load(*args, **kwargs)
+
 torch.load = patched_load
 
 try:
     import omegaconf
     torch.serialization.add_safe_globals([
         typing.Any, typing.Dict, typing.List,
-        omegaconf.listconfig.ListConfig, 
+        omegaconf.listconfig.ListConfig,
         omegaconf.dictconfig.DictConfig,
         omegaconf.base.Metadata,
         omegaconf.base.ContainerMetadata,
@@ -36,24 +42,43 @@ except Exception:
 ic.configureOutput(prefix=f'Debug | ', includeContext=True)
 
 # --- CONFIGURATION ---
+
 COMPUTE_TYPE = "int8"
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 WHISPER_MODEL = "small"
 LINKS_FILE = "links.txt"
 
 def get_groq_client():
-    return Groq(api_key=GROQ_API_KEY)
+    # 1. Try to get it from the system environment
+    api_key = os.environ.get("GROQ_API_KEY")
+
+    # 2. If not found, look for the variable you might have defined at the top
+    if not api_key:
+        try:
+            api_key = GROQ_API_KEY  # This looks at the variable at line 40ish
+        except NameError:
+            api_key = None
+
+    # 3. If still not found, ask the user (Secure prompt)
+    if not api_key:
+        print("🔑 Groq API Key not found in system environment.")
+        api_key = input("👉 Please enter your Groq API Key: ").strip()
+
+    if not api_key:
+        raise ValueError("The Groq API Key is required to run this program.")
+
+    return Groq(api_key=api_key)
 
 def synthesize_and_polish(client, whisper_text, yt_text):
     """
     Feeds BOTH transcripts to Llama to create a master version.
     """
     print("🧠 Synthesizing transcripts with Llama 3.3 (Ensemble Refinement)...")
-    
+
     master_polished = []
     # We use a smaller step because the prompt contains TWO transcripts
     chunk_size = 6000 
-    
+
     # Determine the loop range based on the primary (Whisper) text
     for i in range(0, len(whisper_text), chunk_size):
         seg_wh = whisper_text[i : i + chunk_size]
@@ -102,7 +127,7 @@ def create_epub(title, text, filename):
     book = epub.EpubBook()
     book.set_title(title)
     book.set_language('en')
-    
+
     style = 'body { font-family: sans-serif; line-height: 1.6; padding: 5%; } b { font-weight: bold; }'
     css = epub.EpubItem(uid="style", file_name="style/nav.css", media_type="text/css", content=style)
     book.add_item(css)
@@ -137,7 +162,7 @@ def get_content_from_youtube(url, base_filename):
         'writeautomaticsub': True,
         'subtitleslangs': ['en'],
         'format': 'bestaudio/best',
-        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '192'}],
+        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}],
         'quiet': True,
         'no_warnings': True,
     }
@@ -219,4 +244,4 @@ def main():
         print(f"✨ Created Ensemble Book: {filename}")
 
 if __name__ == "__main__":
-    main(
+    main()
