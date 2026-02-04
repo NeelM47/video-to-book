@@ -1,3 +1,4 @@
+```
 # 📖 TubeToPage: AI-Powered YouTube-to-eBook Converter
 
 **TubeToPage** is a high-performance Python tool that transforms YouTube videos into polished, professional eBooks. By leveraging state-of-the-art AI models via **Groq**, it synthesizes audio transcripts and YouTube captions into a coherent narrative, formatted specifically for "Bionic Reading."
@@ -40,4 +41,65 @@
 ```bash
 git clone https://github.com/NeelM47/video-to-book.git
 cd video-to-book
+```
+
+### 2. Install Dependencies
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Set Your API Key
+For security, this project uses environment variables. You can set your Groq API key in your terminal:
+
+**Linux/macOS:**
+```bash
+export GROQ_API_KEY="your_gsk_key_here"
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:GROQ_API_KEY="your_gsk_key_here"
+```
+
+*Note: If no environment variable is found, the script will securely prompt you for the key at runtime.*
+
+### 4. Run
+Add your YouTube links to `links.txt` and execute:
+```bash
+python main.py
+```
+
+---
+
+## 🛡️ PyTorch 2.6 Fix
+This project includes a built-in patch for the recent **PyTorch 2.6** security update (`weights_only=True` changes) that previously broke `whisperx` and `pyannote` models. It uses a custom `patched_load` strategy to ensure model weights and metadata load correctly without compromising the production workflow.
+
+---
+
+## 🤝 Contributing
+Contributions, issues, and feature requests are welcome! Feel free to check the [issues page](https://github.com/NeelM47/video-to-book/issues).
+
+## 📜 License
+[MIT](https://choosealicense.com/licenses/mit/)
+```
+
+---
+
+### Updated Code Logic for `main.py`
+To make sure the README and the Code match, ensure your `get_groq_client` function looks like this:
+
+```python
+def get_groq_client():
+    # 1. Try to get the key from the Environment Variable (System)
+    api_key = os.environ.get("GROQ_API_KEY")
+    
+    # 2. If not found, ask the user to type it in (Secure)
+    if not api_key:
+        print("🔑 Groq API Key not found in environment variables.")
+        api_key = input("👉 Enter your Groq API Key: ").strip()
+        
+    if not api_key:
+        raise ValueError("A Groq API Key is required to run this program.")
+        
+    return Groq(api_key=api_key)
 ```
