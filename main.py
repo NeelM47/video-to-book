@@ -1,7 +1,6 @@
 import torch
 import typing
 import collections
-from dotenv import load_dotenv
 import functools
 import yt_dlp
 import gc
@@ -11,8 +10,7 @@ import re
 from groq import Groq
 from ebooklib import epub
 from icecream import ic
-
-load_dotenv()
+import subprocess
 
 # --- THE "MASTER KEY" FOR PYTORCH 2.6+ ---
 
@@ -44,7 +42,7 @@ ic.configureOutput(prefix=f'Debug | ', includeContext=True)
 # --- CONFIGURATION ---
 
 COMPUTE_TYPE = "int8"
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GROQ_API_KEY = None
 WHISPER_MODEL = "small"
 LINKS_FILE = "links.txt"
 
@@ -194,16 +192,59 @@ def get_content_from_youtube(url, base_filename):
 def generate_groq_whisper(client, audio_file_path):
     """Uses Groq Whisper API for transcription."""
     print("⚡ Transcribing audio (Groq Whisper-Large-v3)...")
+    MAX_SIZE_MB = 24
+    file_size_mb = os.path.getsize(audio_file_path) / (1024 * 1024)
+    if file_size_mb <= MAX_SIZE_MB:
+        try:
+            with open(audio_file_path, "rb") as file:
+                transcription = client.audio.transcriptions.create(
+                    file=(audio_file_path, file.read()),
+                    model="whisper-large-v3",
+                    language="en"
+                )
+            return transcription.text
+        except Exception as e:
+            print(f"❌ Whisper Transcription Error: {e}")
+            return None
+
+    # CASE 2: File is too large, need to chunk
+    print(f"📦 File is large ({file_size_mb:.2f}MB). Splitting into chunks...")
+    
+    # Create a temp folder for chunks
+    chunk_prefix = "temp_chunk_"
+    # ffmpeg command: split into 15-minute segments (900 seconds)
+    # 15 mins at 64kbps is ~7MB, very safe for Groq
+    cmd = [
+        'ffmpeg', '-i', audio_file_path, 
+        '-f', 'segment', '-segment_time', '900', 
+        '-c', 'copy', f'{chunk_prefix}%03d.mp3'
+    ]
+    
     try:
-        with open(audio_file_path, "rb") as file:
-            transcription = client.audio.transcriptions.create(
-                file=(audio_file_path, file.read()),
-                model="whisper-large-v3",
-                language="en"
-            )
-        return transcription.text
+        subprocess.run(cmd, check=True, capture_output=True)
+        
+        # Identify all created chunks
+        chunk_files = sorted([f for f in os.listdir('.') if f.startswith(chunk_prefix) and f.endswith('.mp3')])
+        full_transcript = []
+
+        for i, cf in enumerate(chunk_files):
+            print(f"   ⚡ Transcribing chunk {i+1}/{len(chunk_files)}...")
+            with open(cf, "rb") as file:
+                response = client.audio.transcriptions.create(
+                    file=(cf, file.read()),
+                    model="whisper-large-v3",
+                    language="en"
+                )
+                full_transcript.append(response.text)
+            os.remove(cf) # Clean up chunk immediately to save disk space
+
+        return " ".join(full_transcript)
+
     except Exception as e:
-        print(f"❌ Whisper Transcription Error: {e}")
+        print(f"❌ Chunked Transcription error: {e}")
+        # Clean up any remaining chunks if it fails
+        for f in os.listdir('.'):
+            if f.startswith(chunk_prefix): os.remove(f)
         return None
 
 def main():
