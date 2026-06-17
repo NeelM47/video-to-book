@@ -6,6 +6,7 @@ import re
 import tempfile
 import shutil
 import concurrent.futures
+import time
 from groq import Groq
 from ebooklib import epub
 import subprocess
@@ -81,21 +82,31 @@ def synthesize_and_polish(client, whisper_text, yt_text):
             "5. Fix all grammar and punctuation. Remove filler words (uh, um, you know).\n"
             "OUTPUT ONLY THE CLEANED PROSE. NO INTRO OR EXPLANATIONS."
         )
-        try:
-            completion = client.chat.completions.create(
-                messages=[
-                    {"role": "system", "content": "You are a professional editor specializing in ensemble transcript refinement."},
-                    {"role": "user", "content": prompt}
-                ],
-                model="llama-3.3-70b-versatile",
-                temperature=0.3,
-            )
-            return completion.choices[0].message.content
-        except Exception as e:
-            print(f"   ❌ Error with LLM on segment {idx+1}/{total}: {e}")
-            return None
+        for attempt in range(3):
+            try:
+                completion = client.chat.completions.create(
+                    messages=[
+                        {"role": "system", "content": "You are a professional editor specializing in ensemble transcript refinement."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    model="llama-3.3-70b-versatile",
+                    temperature=0.3,
+                )
+                return completion.choices[0].message.content
+            except Exception as e:
+                err_str = str(e)
+                if "429" in err_str or "rate_limit" in err_str.lower():
+                    match = re.search(r'try again in ([\d.]+)s', err_str)
+                    wait = float(match.group(1)) + 1 if match else 5
+                    print(f"   ⏳ Rate limited, retrying segment {idx+1} in {wait:.0f}s...")
+                    time.sleep(wait)
+                else:
+                    print(f"   ❌ Error with LLM on segment {idx+1}/{total}: {e}")
+                    return None
+        print(f"   ❌ Failed after 3 retries for segment {idx+1}/{total}")
+        return None
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         futures = {executor.submit(process, i, s[0], s[1]): i for i, s in enumerate(segments)}
         for future in concurrent.futures.as_completed(futures):
             idx = futures[future]
