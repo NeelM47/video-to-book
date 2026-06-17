@@ -14,6 +14,9 @@ venv/
 # Generated Books
 *.epub
 
+# Generated Markdown
+outputs/
+
 # Temp files
 temp_vid_*
 

@@ -1,87 +1,74 @@
-import torch
-import typing
-import collections
-import functools
 import yt_dlp
-import gc
-import whisperx
+import json
+import hashlib
 import os
 import re
+import tempfile
+import shutil
+import concurrent.futures
 from groq import Groq
 from ebooklib import epub
-from icecream import ic
 import subprocess
 
-# --- THE "MASTER KEY" FOR PYTORCH 2.6+ ---
+# --- COMPILED REGEXES ---
 
-import torch.serialization
-original_load = torch.load
-
-def patched_load(*args, **kwargs):
-    kwargs["weights_only"] = False
-    return original_load(*args, **kwargs)
-
-torch.load = patched_load
-
-try:
-    import omegaconf
-    torch.serialization.add_safe_globals([
-        typing.Any, typing.Dict, typing.List,
-        omegaconf.listconfig.ListConfig,
-        omegaconf.dictconfig.DictConfig,
-        omegaconf.base.Metadata,
-        omegaconf.base.ContainerMetadata,
-        collections.defaultdict,
-        collections.deque
-    ])
-except Exception:
-    pass
-
-ic.configureOutput(prefix=f'Debug | ', includeContext=True)
+WORD_RE = re.compile(r'\b\w+\b')
+SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+VTT_CLEANUP_RE = re.compile(r'WEBVTT|NOTE .*|STYLE.*|-->.*')
+HTML_TAG_RE = re.compile(r'<[^>]*>')
+TIMECODE_RE = re.compile(r'\d{2}:\d{2}:\d{2}\.\d{3}')
+TITLE_CLEANUP_RE = re.compile(r'[^\w\s-]')
 
 # --- CONFIGURATION ---
 
-COMPUTE_TYPE = "int8"
+CACHE_FILE = "cache.json"
 GROQ_API_KEY = None
-WHISPER_MODEL = "small"
 LINKS_FILE = "links.txt"
 
 def get_groq_client():
-    # 1. Try to get it from the system environment
     api_key = os.environ.get("GROQ_API_KEY")
-
-    # 2. If not found, look for the variable you might have defined at the top
-    if not api_key:
-        try:
-            api_key = GROQ_API_KEY  # This looks at the variable at line 40ish
-        except NameError:
-            api_key = None
-
-    # 3. If still not found, ask the user (Secure prompt)
     if not api_key:
         print("🔑 Groq API Key not found in system environment.")
         api_key = input("👉 Please enter your Groq API Key: ").strip()
-
     if not api_key:
         raise ValueError("The Groq API Key is required to run this program.")
-
     return Groq(api_key=api_key)
 
+# --- CACHE ---
+
+def load_cache():
+    if os.path.exists(CACHE_FILE):
+        try:
+            with open(CACHE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def save_cache(cache):
+    with open(CACHE_FILE, "w") as f:
+        json.dump(cache, f, indent=2)
+
+def cache_key(url):
+    return hashlib.sha256(url.encode()).hexdigest()[:16]
+
 def synthesize_and_polish(client, whisper_text, yt_text):
-    """
-    Feeds BOTH transcripts to Llama to create a master version.
-    """
     print("🧠 Synthesizing transcripts with Llama 3.3 (Ensemble Refinement)...")
 
-    master_polished = []
-    # We use a smaller step because the prompt contains TWO transcripts
-    chunk_size = 6000 
+    wh_words = whisper_text.split()
+    yt_words = yt_text.split() if yt_text else []
+    WORD_CHUNK = 1000
 
-    # Determine the loop range based on the primary (Whisper) text
-    for i in range(0, len(whisper_text), chunk_size):
-        seg_wh = whisper_text[i : i + chunk_size]
-        seg_yt = yt_text[i : i + chunk_size] if yt_text else "Not available."
-        
+    segments = []
+    for i in range(0, len(wh_words), WORD_CHUNK):
+        seg_wh = " ".join(wh_words[i:i + WORD_CHUNK])
+        seg_yt = " ".join(yt_words[i:i + WORD_CHUNK]) if yt_words else "Not available."
+        segments.append((seg_wh, seg_yt))
+
+    total = len(segments)
+    results = [None] * total
+
+    def process(idx, seg_wh, seg_yt):
         prompt = (
             f"You are a master scientific editor and technical writer. Below are two imperfect transcripts of the same video.\n\n"
             f"TRANSCRIPT A (Whisper AI): {seg_wh}\n\n"
@@ -94,7 +81,6 @@ def synthesize_and_polish(client, whisper_text, yt_text):
             "5. Fix all grammar and punctuation. Remove filler words (uh, um, you know).\n"
             "OUTPUT ONLY THE CLEANED PROSE. NO INTRO OR EXPLANATIONS."
         )
-        
         try:
             completion = client.chat.completions.create(
                 messages=[
@@ -104,12 +90,21 @@ def synthesize_and_polish(client, whisper_text, yt_text):
                 model="llama-3.3-70b-versatile",
                 temperature=0.3,
             )
-            master_polished.append(completion.choices[0].message.content)
-            print(f"   ✅ Synthesized segment {(i // chunk_size) + 1}...")
+            return completion.choices[0].message.content
         except Exception as e:
-            print(f"   ❌ Error with LLM on segment: {e}")
+            print(f"   ❌ Error with LLM on segment {idx+1}/{total}: {e}")
+            return None
 
-    return " ".join(master_polished)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {executor.submit(process, i, s[0], s[1]): i for i, s in enumerate(segments)}
+        for future in concurrent.futures.as_completed(futures):
+            idx = futures[future]
+            content = future.result()
+            if content:
+                print(f"   ✅ Synthesized segment {idx+1}/{total}...")
+            results[idx] = content
+
+    return " ".join(r for r in results if r)
 
 def bionic_format(text):
     def bold_word(match):
@@ -118,10 +113,12 @@ def bionic_format(text):
             mid = (len(word) + 1) // 2
             return f"<b>{word[:mid]}</b>{word[mid:]}"
         return word
-    return re.sub(r'\b\w+\b', bold_word, text)
+    return WORD_RE.sub(bold_word, text)
 
 def create_epub(title, text, filename):
     print(f"📚 Building EPUB: {filename}...")
+    os.makedirs("outputs", exist_ok=True)
+    filepath = os.path.join("outputs", filename)
     book = epub.EpubBook()
     book.set_title(title)
     book.set_language('en')
@@ -146,7 +143,71 @@ def create_epub(title, text, filename):
     book.add_item(epub.EpubNcx())
     book.add_item(epub.EpubNav())
     book.spine = ['nav'] + chapters
-    epub.write_epub(filename, book)
+    epub.write_epub(filepath, book)
+
+def bionic_format_md(text):
+    def bold_word(match):
+        word = match.group(0)
+        if len(word) >= 2:
+            mid = (len(word) + 1) // 2
+            return f"**{word[:mid]}**{word[mid:]}"
+        return word
+    return WORD_RE.sub(bold_word, text)
+
+def create_markdown(title, text, video_url, filename):
+    print(f"📄 Building Markdown: {filename}...")
+
+    words = text.split()
+    total_words = len(words)
+    reading_time = max(1, round(total_words / 200))
+    WORDS_PER_CHAPTER = 400
+    word_chunks = []
+    for i in range(0, total_words, WORDS_PER_CHAPTER):
+        word_chunks.append(" ".join(words[i:i+WORDS_PER_CHAPTER]))
+    total_chapters = len(word_chunks)
+
+    lines = []
+    lines.append("---")
+    lines.append(f'title: "{title}"')
+    lines.append(f"reading_time: {reading_time} min")
+    lines.append(f"chapters: {total_chapters}")
+    lines.append(f"words: {total_words}")
+    lines.append(f"source: {video_url}")
+    lines.append("---")
+    lines.append("")
+    lines.append(f"# {title}")
+    lines.append("")
+
+    bar_len = 12
+
+    for idx, chunk in enumerate(word_chunks):
+        chap_num = idx + 1
+        pct = int((chap_num / total_chapters) * 100)
+        filled = round((chap_num / total_chapters) * bar_len)
+        bar = "●" * filled + "○" * (bar_len - filled)
+        lines.append(f"## Chapter {chap_num} — [{chap_num}/{total_chapters}] {bar} {pct}%")
+        lines.append("")
+
+        sentences = SENTENCE_SPLIT_RE.split(chunk)
+        sentence_groups = []
+        for s in range(0, len(sentences), 3):
+            sentence_groups.append(" ".join(sentences[s:s+3]))
+
+        for group in sentence_groups:
+            bionic = bionic_format_md(group)
+            lines.append(bionic)
+            lines.append("")
+
+        if chap_num < total_chapters:
+            lines.append("---")
+            lines.append("")
+
+    content = "\n".join(lines)
+    os.makedirs("outputs", exist_ok=True)
+    filepath = os.path.join("outputs", filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        f.write(content)
+    print(f"   ✅ Saved: {filepath}")
 
 def get_content_from_youtube(url, base_filename):
     """Downloads BOTH audio and subtitles."""
@@ -160,25 +221,28 @@ def get_content_from_youtube(url, base_filename):
         'writeautomaticsub': True,
         'subtitleslangs': ['en'],
         'format': 'bestaudio/best',
-        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '64'}],
+        'postprocessors': [{'key': 'FFmpegExtractAudio','preferredcodec': 'mp3','preferredquality': '32'}],
         'quiet': True,
         'no_warnings': True,
+        'retries': 5,
+        'fragment_retries': 5,
+        'socket_timeout': 30,
     }
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             video_title = info.get('title', 'Untitled_Video')
-            video_title = re.sub(r'[^\w\s-]', '', video_title).strip().replace(' ', '_')
+            video_title = TITLE_CLEANUP_RE.sub('', video_title).strip().replace(' ', '_')
 
         yt_text = ""
         sub_files = [f for f in os.listdir('.') if f.startswith(base_filename) and f.endswith('.vtt')]
         if sub_files:
             with open(sub_files[0], 'r', encoding='utf-8') as f:
                 content = f.read()
-            clean_text = re.sub(r'WEBVTT|NOTE .*|STYLE.*|-->.*', '', content)
-            clean_text = re.sub(r'<[^>]*>', '', clean_text)
-            clean_text = re.sub(r'\d{2}:\d{2}:\d{2}.\d{3}', '', clean_text)
+            clean_text = VTT_CLEANUP_RE.sub('', content)
+            clean_text = HTML_TAG_RE.sub('', clean_text)
+            clean_text = TIMECODE_RE.sub('', clean_text)
             yt_text = " ".join(clean_text.split())
             os.remove(sub_files[0])
             print("✅ YouTube captions extracted.")
@@ -207,24 +271,22 @@ def generate_groq_whisper(client, audio_file_path):
             print(f"❌ Whisper Transcription Error: {e}")
             return None
 
-    # CASE 2: File is too large, need to chunk
     print(f"📦 File is large ({file_size_mb:.2f}MB). Splitting into chunks...")
-    
-    # Create a temp folder for chunks
-    chunk_prefix = "temp_chunk_"
-    # ffmpeg command: split into 15-minute segments (900 seconds)
-    # 15 mins at 64kbps is ~7MB, very safe for Groq
-    cmd = [
-        'ffmpeg', '-i', audio_file_path, 
-        '-f', 'segment', '-segment_time', '900', 
-        '-c', 'copy', f'{chunk_prefix}%03d.mp3'
-    ]
-    
+
+    temp_dir = tempfile.mkdtemp(prefix="whisper_chunks_")
     try:
+        chunk_prefix = os.path.join(temp_dir, "chunk_")
+        cmd = [
+            'ffmpeg', '-i', audio_file_path,
+            '-f', 'segment', '-segment_time', '900',
+            '-c', 'copy', f'{chunk_prefix}%03d.mp3'
+        ]
         subprocess.run(cmd, check=True, capture_output=True)
-        
-        # Identify all created chunks
-        chunk_files = sorted([f for f in os.listdir('.') if f.startswith(chunk_prefix) and f.endswith('.mp3')])
+
+        chunk_files = sorted([
+            os.path.join(temp_dir, f) for f in os.listdir(temp_dir)
+            if f.startswith("chunk_") and f.endswith(".mp3")
+        ])
         full_transcript = []
 
         for i, cf in enumerate(chunk_files):
@@ -236,19 +298,18 @@ def generate_groq_whisper(client, audio_file_path):
                     language="en"
                 )
                 full_transcript.append(response.text)
-            os.remove(cf) # Clean up chunk immediately to save disk space
 
         return " ".join(full_transcript)
 
     except Exception as e:
         print(f"❌ Chunked Transcription error: {e}")
-        # Clean up any remaining chunks if it fails
-        for f in os.listdir('.'):
-            if f.startswith(chunk_prefix): os.remove(f)
         return None
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 def main():
     client = get_groq_client()
+    cache = load_cache()
 
     if not os.path.exists(LINKS_FILE):
         print(f"❌ '{LINKS_FILE}' not found."); return
@@ -260,29 +321,48 @@ def main():
 
     for idx, url in enumerate(urls):
         print(f"\n--- Processing Video {idx+1}/{len(urls)} ---")
-        temp_base = f"temp_vid_{idx}"
-        
-        # 1. Download both Audio and YT Subtitles
-        video_title, yt_text, audio_file = get_content_from_youtube(url, temp_base)
+        key = cache_key(url)
 
-        if not audio_file or not os.path.exists(audio_file):
-            print(f"⚠️ Failed to get audio for {url}. Skipping."); continue
+        if key in cache and cache[key].get("final_text"):
+            print(f"📦 Using cached result for {url}")
+            video_title = cache[key].get("title", "Untitled_Video")
+            final_text = cache[key]["final_text"]
+        else:
+            temp_base = f"temp_vid_{idx}"
 
-        # 2. Transcribe Audio
-        whisper_text = generate_groq_whisper(client, audio_file)
-        if os.path.exists(audio_file):
-            os.remove(audio_file)
+            if key in cache and cache[key].get("whisper_text"):
+                print("📦 Using cached transcript (skipping download + transcription)")
+                whisper_text = cache[key]["whisper_text"]
+                yt_text = cache[key].get("yt_text", "")
+                video_title = cache[key].get("title", "Untitled_Video")
+            else:
+                video_title, yt_text, audio_file = get_content_from_youtube(url, temp_base)
+                if not audio_file or not os.path.exists(audio_file):
+                    print(f"⚠️ Failed to get audio for {url}. Skipping.")
+                    continue
 
-        if not whisper_text:
-            print(f"⚠️ Failed to transcribe audio. Skipping."); continue
+                whisper_text = generate_groq_whisper(client, audio_file)
+                if os.path.exists(audio_file):
+                    os.remove(audio_file)
 
-        # 3. Master Synthesis (AI processes both Whisper and YT Transcript)
-        final_text = synthesize_and_polish(client, whisper_text, yt_text)
-        
-        # 4. EPUB Generation
-        filename = f"{video_title}.epub"
-        create_epub(video_title, final_text, filename)
-        print(f"✨ Created Ensemble Book: {filename}")
+                if not whisper_text:
+                    print(f"⚠️ Failed to transcribe audio. Skipping.")
+                    continue
+
+                cache[key] = {"whisper_text": whisper_text, "yt_text": yt_text, "title": video_title}
+                save_cache(cache)
+
+            final_text = synthesize_and_polish(client, whisper_text, yt_text)
+            cache[key]["final_text"] = final_text
+            save_cache(cache)
+
+        epub_filename = f"{video_title}.epub"
+        create_epub(video_title, final_text, epub_filename)
+        print(f"✨ Created Ensemble Book: outputs/{epub_filename}")
+
+        md_filename = f"{video_title}.md"
+        create_markdown(video_title, final_text, url, md_filename)
+        print(f"✨ Created Markdown: outputs/{md_filename}")
 
 if __name__ == "__main__":
     main()
