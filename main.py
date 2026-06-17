@@ -82,7 +82,7 @@ def synthesize_and_polish(client, whisper_text, yt_text):
             "5. Fix all grammar and punctuation. Remove filler words (uh, um, you know).\n"
             "OUTPUT ONLY THE CLEANED PROSE. NO INTRO OR EXPLANATIONS."
         )
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 completion = client.chat.completions.create(
                     messages=[
@@ -96,14 +96,22 @@ def synthesize_and_polish(client, whisper_text, yt_text):
             except Exception as e:
                 err_str = str(e)
                 if "429" in err_str or "rate_limit" in err_str.lower():
-                    match = re.search(r'try again in ([\d.]+)s', err_str)
-                    wait = float(match.group(1)) + 1 if match else 5
+                    match = re.search(r'try again in (?:(\d+)m)?([\d.]+)s', err_str)
+                    if match:
+                        minutes = float(match.group(1)) if match.group(1) else 0
+                        seconds = float(match.group(2))
+                        wait = minutes * 60 + seconds + 1
+                    else:
+                        wait = 5
+                    if wait > 30:
+                        print(f"   ⏳ Daily rate limit hit (need {wait:.0f}s). Skipping segment {idx+1} — re-run tomorrow.")
+                        return None
                     print(f"   ⏳ Rate limited, retrying segment {idx+1} in {wait:.0f}s...")
                     time.sleep(wait)
                 else:
                     print(f"   ❌ Error with LLM on segment {idx+1}/{total}: {e}")
                     return None
-        print(f"   ❌ Failed after 3 retries for segment {idx+1}/{total}")
+        print(f"   ❌ Failed after {5} retries for segment {idx+1}/{total}")
         return None
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
